@@ -32,5 +32,11 @@ $paragraphs = [
     <?php foreach ($paragraphs as $p): ?>
         <p><?= htmlspecialchars($p) ?></p>
     <?php endforeach; ?>
+    <h2>Les Apprenties</h2>
+    <li><a href="/pages/about/anton.php" title="About Anton">Anton</a></li>
+    <li>Victor</li>
+    <li>Bryan</li>
+    <li>Thomas</li>
+    <li>Davide</li>
 </body>
 </html>
