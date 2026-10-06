@@ -6,7 +6,8 @@
     <p>Born: 10.02.2011</p>
     <p>Email: <a href="mailto:davide.bonadeni@epfl.ch">davide.bonadeni@epfl.ch</a></p>
     <a href="/index.php">Back</a>
-    <button>hello</button>
+    
+    
 
 </body>
 </html>
@@ -14,6 +15,6 @@
 
 <style>
   body {
-    background-image: url('chatdavide.jpg');
+    background-image: url('../../src/chatdavide.jpg');
   }
 </style>
