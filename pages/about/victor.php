@@ -29,6 +29,14 @@
                 <div id="interactiveDiv">
                     <p>He enjoys exploring new ideas and is always eager to learn and grow.</p>
                 </div>
+                <div id="interactiveDiv"> 
+                    <p>Weather in Lausanne: <span id="weather">...</span></p>
+                    <script>
+                        fetch("https://api.open-meteo.com/v1/forecast?latitude=46.52&longitude=6.63&current=temperature_2m")
+                            .then(r => r.json())
+                            .then(d => document.getElementById("weather").textContent = d.current.temperature_2m + " °C");
+                    </script>
+                </div>
 
             </article>
         </section>
