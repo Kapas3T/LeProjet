@@ -37,6 +37,6 @@ $paragraphs = [
     <li>Victor</li>
     <li>Bryan</li>
     <li><a href="/pages/about/thomas.php" title="About Thomas">Thomas</a></li>
-    <li>Davide</li>
+    <li><a href="/pages/about/davide.php" title="About Davide">Davide</a></li>
 </body>
 </html>
