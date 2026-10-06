@@ -1,0 +1,27 @@
+[Unit]
+Description=Photo vault API
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=leit
+WorkingDirectory=/home/leit/LeProjet/pi-api
+Environment=DATA_DIR=/mnt/vault PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ExecStart=/home/leit/LeProjet/pi-api/venv/bin/python app.py
+
+# While the vault is locked the app refuses to start; systemd keeps retrying,
+# so the API comes up by itself a few seconds after the vault is unlocked.
+Restart=always
+RestartSec=10
+
+# Hardening: the service cannot gain privileges or change the system, and can only read the home folder.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
