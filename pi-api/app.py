@@ -22,6 +22,7 @@ DB_PATH = os.path.join(DATA_DIR, "app.db")
 os.makedirs(IMG_DIR, exist_ok=True)
 
 SESSION_TTL = 8 * 3600
+MIN_PASSWORD = 12
 ph = PasswordHasher()  # Argon2id
 DUMMY_HASH = ph.hash("dummy")  # makes login timing equal for unknown users
 
@@ -47,19 +48,37 @@ with sqlite3.connect(DB_PATH) as c:
     c.executescript(
         """
         CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, pw_hash TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, expires REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             note TEXT NOT NULL DEFAULT '',
-            image TEXT
+            image TEXT,
+            owner TEXT NOT NULL DEFAULT '',
+            shared INTEGER NOT NULL DEFAULT 0
         );
         """
     )
+    # Upgrade an older database: add ownership, give old items to the first user.
+    if "owner" not in [r[1] for r in c.execute("PRAGMA table_info(items)")]:
+        c.execute("ALTER TABLE items ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+        c.execute("ALTER TABLE items ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
+        c.execute("UPDATE items SET owner=COALESCE((SELECT username FROM users ORDER BY rowid LIMIT 1), '')")
+    # Sessions are short-lived, so an old table without usernames is simply recreated.
+    if "username" not in [r[1] for r in c.execute("PRAGMA table_info(sessions)")]:
+        c.execute("DROP TABLE IF EXISTS sessions")
+    c.execute("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires REAL NOT NULL)")
 
 
 def sha256(s):
     return hashlib.sha256(s.encode()).hexdigest()
+
+
+def new_session(username):
+    token = secrets.token_urlsafe(32)
+    db().execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
+    db().execute("INSERT INTO sessions VALUES (?, ?, ?)", (sha256(token), username, time.time() + SESSION_TTL))
+    db().commit()
+    return token  # only the SHA-256 of the token is stored
 
 
 def require_auth(f):
@@ -69,11 +88,12 @@ def require_auth(f):
         if not auth.startswith("Bearer "):
             abort(401)
         row = db().execute(
-            "SELECT 1 FROM sessions WHERE token_hash=? AND expires>?",
+            "SELECT username FROM sessions WHERE token_hash=? AND expires>?",
             (sha256(auth[7:]), time.time()),
         ).fetchone()
         if not row:
             abort(401)
+        g.user = row["username"]
         return f(*args, **kwargs)
 
     return wrapper
@@ -104,38 +124,91 @@ def too_large(_):
 @app.post("/login")
 def login():
     data = request.get_json(silent=True) or {}
-    row = db().execute("SELECT pw_hash FROM users WHERE username=?", (data.get("username", ""),)).fetchone()
+    username = str(data.get("username", ""))
+    row = db().execute("SELECT pw_hash FROM users WHERE username=?", (username,)).fetchone()
     try:
-        ph.verify(row["pw_hash"] if row else DUMMY_HASH, data.get("password", ""))
+        ph.verify(row["pw_hash"] if row else DUMMY_HASH, str(data.get("password", "")))
         ok = row is not None
     except Exception:
         ok = False
     if not ok:
         time.sleep(1)  # slows down password guessing
         abort(401)
+    return jsonify(token=new_session(username), username=username)
 
-    token = secrets.token_urlsafe(32)
-    db().execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
-    db().execute("INSERT INTO sessions VALUES (?, ?)", (sha256(token), time.time() + SESSION_TTL))
+
+@app.post("/password")
+@require_auth
+def change_password():
+    data = request.get_json(silent=True) or {}
+    new = str(data.get("new", ""))
+    if len(new) < MIN_PASSWORD:
+        return jsonify(error=f"password must be at least {MIN_PASSWORD} characters"), 400
+    row = db().execute("SELECT pw_hash FROM users WHERE username=?", (g.user,)).fetchone()
+    try:
+        ph.verify(row["pw_hash"], str(data.get("old", "")))
+    except Exception:
+        time.sleep(1)
+        return jsonify(error="wrong current password"), 403
+    db().execute("UPDATE users SET pw_hash=? WHERE username=?", (ph.hash(new), g.user))
+    db().execute("DELETE FROM sessions WHERE username=?", (g.user,))  # log out every other device
     db().commit()
-    return jsonify(token=token)  # only the SHA-256 of the token is stored
+    return jsonify(token=new_session(g.user))
+
+
+def visible_item(item_id):
+    """An item I own or one that is shared with everyone."""
+    row = db().execute("SELECT * FROM items WHERE id=? AND (owner=? OR shared=1)", (item_id, g.user)).fetchone()
+    if not row:
+        abort(404)
+    return row
+
+
+def own_item(item_id):
+    """Only my own item; others get 404 so private items do not even reveal they exist."""
+    row = db().execute("SELECT * FROM items WHERE id=? AND owner=?", (item_id, g.user)).fetchone()
+    if not row:
+        abort(404)
+    return row
 
 
 @app.get("/items")
 @require_auth
 def list_items():
-    rows = db().execute("SELECT id, title, note, image IS NOT NULL AS has_image FROM items ORDER BY id").fetchall()
-    return jsonify([dict(r) for r in rows])
+    rows = db().execute(
+        "SELECT id, title, note, owner, shared, image IS NOT NULL AS has_image FROM items "
+        "WHERE owner=? OR shared=1 ORDER BY id",
+        (g.user,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        item = dict(r)
+        item["shared"] = bool(item["shared"])
+        item["mine"] = item["owner"] == g.user
+        out.append(item)
+    return jsonify(out)
+
+
+def read_item_fields():
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title", "")).strip()
+    if not title:
+        abort(400, description="title required")
+    return title, str(data.get("note", "")), 1 if data.get("shared") else 0
+
+
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify(error=e.description), 400
 
 
 @app.post("/items")
 @require_auth
 def create_item():
-    data = request.get_json(silent=True) or {}
-    title = str(data.get("title", "")).strip()
-    if not title:
-        return jsonify(error="title required"), 400
-    cur = db().execute("INSERT INTO items(title, note) VALUES (?, ?)", (title, str(data.get("note", ""))))
+    title, note, shared = read_item_fields()
+    cur = db().execute(
+        "INSERT INTO items(title, note, owner, shared) VALUES (?, ?, ?, ?)", (title, note, g.user, shared)
+    )
     db().commit()
     return jsonify(id=cur.lastrowid), 201
 
@@ -143,23 +216,17 @@ def create_item():
 @app.put("/items/<int:item_id>")
 @require_auth
 def update_item(item_id):
-    data = request.get_json(silent=True) or {}
-    title = str(data.get("title", "")).strip()
-    if not title:
-        return jsonify(error="title required"), 400
-    cur = db().execute("UPDATE items SET title=?, note=? WHERE id=?", (title, str(data.get("note", "")), item_id))
+    own_item(item_id)
+    title, note, shared = read_item_fields()
+    db().execute("UPDATE items SET title=?, note=?, shared=? WHERE id=?", (title, note, shared, item_id))
     db().commit()
-    if not cur.rowcount:
-        abort(404)
     return jsonify(ok=True)
 
 
 @app.delete("/items/<int:item_id>")
 @require_auth
 def delete_item(item_id):
-    row = db().execute("SELECT image FROM items WHERE id=?", (item_id,)).fetchone()
-    if not row:
-        abort(404)
+    row = own_item(item_id)
     remove_image(row["image"])
     db().execute("DELETE FROM items WHERE id=?", (item_id,))
     db().commit()
@@ -188,9 +255,7 @@ def remove_image(name):
 @app.post("/items/<int:item_id>/image")
 @require_auth
 def upload_image(item_id):
-    row = db().execute("SELECT image FROM items WHERE id=?", (item_id,)).fetchone()
-    if not row:
-        abort(404)
+    row = own_item(item_id)
     f = request.files.get("image")
     if not f:
         return jsonify(error="image field required"), 400
@@ -211,16 +276,16 @@ def upload_image(item_id):
 @app.get("/items/<int:item_id>/image")
 @require_auth
 def get_image(item_id):
-    row = db().execute("SELECT image FROM items WHERE id=?", (item_id,)).fetchone()
-    if not row or not row["image"]:
+    row = visible_item(item_id)
+    if not row["image"]:
         abort(404)
     return send_file(os.path.join(IMG_DIR, row["image"]))
 
 
 def add_user(username):
     pw = getpass.getpass("Password: ")
-    if len(pw) < 12:
-        sys.exit("Password must be at least 12 characters.")
+    if len(pw) < MIN_PASSWORD:
+        sys.exit(f"Password must be at least {MIN_PASSWORD} characters.")
     if pw != getpass.getpass("Repeat: "):
         sys.exit("Passwords do not match.")
     with sqlite3.connect(DB_PATH) as conn:
