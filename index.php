@@ -34,8 +34,8 @@ $paragraphs = [
     <?php endforeach; ?>
     <h2>Les Apprenties</h2>
     <li><a href="/pages/about/anton.php" title="About Anton">Anton</a></li>
-    <li>Victor</li>
-    <li>Bryan</li>
+    <li><a href="/pages/about/victor.php" title="About Victor">Victor</a></li>
+    <li><a href="/pages/about/bryan.php" title="About Bryan">Bryan</a></li>
     <li><a href="/pages/about/thomas.php" title="About Thomas">Thomas</a></li>
     <li><a href="/pages/about/davide.php" title="About Davide">Davide</a></li>
 </body>
