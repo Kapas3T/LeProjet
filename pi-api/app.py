@@ -1,6 +1,7 @@
 import getpass
 import hashlib
 import io
+import logging
 import os
 import secrets
 import sqlite3
@@ -36,6 +37,26 @@ DUMMY_HASH = ph.hash("dummy")  # makes login timing equal for unknown users
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10 MB per upload
+
+# Security log: `journalctl -u vault-api` shows who logged in, failed, or got locked out.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+log = logging.getLogger("vault")
+
+
+def weak_password(pw, username=""):
+    """Return why a password is too easy to guess, or None if it is acceptable."""
+    if len(pw) < MIN_PASSWORD:
+        return f"password must be at least {MIN_PASSWORD} characters"
+    if username and username.lower() in pw.lower():
+        return "password must not contain your username"
+    if len(set(pw)) < 6:
+        return "password uses too few different characters"
+    if pw.isdigit():
+        return "password must not be only digits"
+    for size in range(1, len(pw) // 2 + 1):
+        if len(pw) % size == 0 and pw[:size] * (len(pw) // size) == pw:
+            return "password must not just repeat the same short piece"
+    return None
 
 
 def db():
@@ -147,6 +168,7 @@ def require_auth(f):
         if not row:
             abort(401)
         g.user = row["username"]
+        g.token_hash = sha256(auth[7:])
         return f(*args, **kwargs)
 
     return wrapper
@@ -180,6 +202,7 @@ def login():
     username = str(data.get("username", ""))
     keys = attempt_keys(username)
     if locked_out(keys):
+        log.warning("login LOCKED OUT user=%.32r ip=%s", username, client_ip())
         return jsonify(error="too many attempts, try again in 15 minutes"), 429
     row = db().execute("SELECT pw_hash FROM users WHERE username=?", (username,)).fetchone()
     try:
@@ -188,10 +211,20 @@ def login():
     except Exception:
         ok = False
     if not ok:
+        log.warning("login FAILED user=%.32r ip=%s", username, client_ip())
         record_failure(keys)
         time.sleep(1)  # slows down password guessing
         abort(401)
+    log.info("login ok user=%s ip=%s", username, client_ip())
     return jsonify(token=new_session(username), username=username)
+
+
+@app.post("/logout")
+@require_auth
+def logout():
+    db().execute("DELETE FROM sessions WHERE token_hash=?", (g.token_hash,))
+    db().commit()
+    return jsonify(ok=True)
 
 
 @app.post("/password")
@@ -199,8 +232,9 @@ def login():
 def change_password():
     data = request.get_json(silent=True) or {}
     new = str(data.get("new", ""))
-    if len(new) < MIN_PASSWORD:
-        return jsonify(error=f"password must be at least {MIN_PASSWORD} characters"), 400
+    problem = weak_password(new, g.user)
+    if problem:
+        return jsonify(error=problem), 400
     keys = attempt_keys(g.user)
     if locked_out(keys):
         return jsonify(error="too many attempts, try again in 15 minutes"), 429
@@ -208,9 +242,11 @@ def change_password():
     try:
         ph.verify(row["pw_hash"], str(data.get("old", "")))
     except Exception:
+        log.warning("password change FAILED (wrong current password) user=%s ip=%s", g.user, client_ip())
         record_failure(keys)
         time.sleep(1)
         return jsonify(error="wrong current password"), 403
+    log.info("password changed user=%s ip=%s", g.user, client_ip())
     db().execute("UPDATE users SET pw_hash=? WHERE username=?", (ph.hash(new), g.user))
     db().execute("DELETE FROM sessions WHERE username=?", (g.user,))  # log out every other device
     db().commit()
@@ -388,8 +424,9 @@ def get_image(item_id):
 
 def add_user(username):
     pw = getpass.getpass("Password: ")
-    if len(pw) < MIN_PASSWORD:
-        sys.exit(f"Password must be at least {MIN_PASSWORD} characters.")
+    problem = weak_password(pw, username)
+    if problem:
+        sys.exit(f"Rejected: {problem}.")
     if pw != getpass.getpass("Repeat: "):
         sys.exit("Passwords do not match.")
     with sqlite3.connect(DB_PATH) as conn:

@@ -104,6 +104,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $msg = $code === 0 ? unreachable_message() : ($code === 429 ? ($data['error'] ?? 'Too many attempts') : 'Wrong username or password');
         }
     } elseif ($action === 'logout') {
+        if (!empty($_SESSION['token'])) {
+            api('POST', '/logout'); // revoke the token on the Pi too, not only the local session
+        }
         session_destroy();
         header('Location: admin.php');
         exit;
