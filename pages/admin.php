@@ -27,6 +27,7 @@ function api($method, $path, $body = null, $file = null) {
     ]]);
     $raw = @file_get_contents($API . $path, false, $ctx);
     if ($raw === false) {
+        $GLOBALS['api_error'] = error_get_last()['message'] ?? '';
         return [0, null, ''];
     }
     preg_match('#HTTP/\S+ (\d+)#', $http_response_header[0], $m);
@@ -38,7 +39,14 @@ function unreachable_message() {
     if (str_starts_with($API, 'https') && !extension_loaded('openssl')) {
         return 'PHP cannot make HTTPS requests: enable extension=openssl in php.ini';
     }
-    return 'The Pi is unreachable. It may be switched off, or its vault is locked.';
+    $reason = $GLOBALS['api_error'] ?? '';
+    $hint = '';
+    if (stripos($reason, 'certificate') !== false || stripos($reason, 'SSL') !== false) {
+        $hint = ' Your PHP cannot verify HTTPS certificates: set openssl.cafile in php.ini to a cacert.pem file.';
+    } elseif (stripos($reason, 'getaddrinfo') !== false || stripos($reason, 'resolve') !== false) {
+        $hint = ' Your computer cannot look up the address: check your internet connection or DNS.';
+    }
+    return 'The Pi is unreachable.' . $hint . ($reason ? " (PHP says: $reason)" : '') . ' If everything on your side is fine, the Pi may be switched off or its vault locked.';
 }
 
 $_SESSION['csrf'] = $_SESSION['csrf'] ?? bin2hex(random_bytes(16));
