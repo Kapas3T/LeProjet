@@ -3,7 +3,7 @@
 session_set_cookie_params(['httponly' => true, 'samesite' => 'Strict']);
 session_start();
 
-$API = getenv('PI_API') ?: 'http://100.121.102.121:8000'; // Tailscale IP of the Pi
+$API = getenv('PI_API') ?: 'https://pi-lab-01.tailfc7dca.ts.net'; // public HTTPS address of the Pi (Tailscale Funnel)
 
 function api($method, $path, $body = null, $file = null) {
     global $API;
