@@ -7,10 +7,13 @@
     <p>Email: <a href="mailto:davide.bonadeni@epfl.ch">davide.bonadeni@epfl.ch</a></p>
     <a href="/index.php">Back</a>
     <button>hello</button>
-    <style>
-    body {
-  background-image: url('chatdavide.jpg');
-}
-</style>
+
 </body>
 </html>
+
+
+<style>
+  body {
+    background-image: url('chatdavide.jpg');
+  }
+</style>
