@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>About Davide</title>
+    <title><Style>color:blue;</Style>About Davide</title>
 </head>
 <body>
     <h1>Davide</h1>
