@@ -23,11 +23,14 @@
             padding: 20px;
             text-align: center;
         }
-        section:hover {
-            transition: background-color 0.3s ease;
-            background-color: #d3d3d3;
-            transition: font-size 0.3s ease;
-            font-size: 1.2em;
+
+        #interactiveDiv {
+            transition: background-color 0.3s ease, font-size 0.3s ease;
+        }
+
+        #interactiveDiv:hover {
+            background-color: #e4e4e4;
+            font-size: 1.1em;
         }
 
         footer {
@@ -47,17 +50,26 @@
         </header>
         <body>
             <section>
-                <article> 
-                    <p>Born in 2008</p>
-                    <p>Lives in Switzerland</p>
-                    <p>Victor is a passionate individual with a keen interest in technology and innovation.</p>
-                    <p>He enjoys exploring new ideas and is always eager to learn and grow.</p>
+                <article>
+                    <div id="interactiveDiv"> 
+                        <p>Born in 2008</p>
+                    </div>
+                    <div id="interactiveDiv">
+                        <p>Lives in Switzerland</p>
+                    </div>
+                    <div id="interactiveDiv">
+                        <p>Victor is a passionate individual with a keen interest in technology and innovation.</p>
+                    </div>
+                    <div id="interactiveDiv">
+                        <p>He enjoys exploring new ideas and is always eager to learn and grow.</p>
+                    </div>
                 </article>
             </section>
         <footer>
-            <nav>
-                <p>footer</p>
-            </nav>
+            <div>
+                <p> A foot in the footer</p>
+                <img src="../../src/foot.jpg" alt="Italian Trulli" height="50" width="50">
+            </div>
         </footer>
     </body>
 </html>
