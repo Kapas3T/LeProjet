@@ -9,12 +9,11 @@
     ">Born: 10.02.2011</p>
     <p>Email: <a href="mailto:davide.bonadeni@epfl.ch">davide.bonadeni@epfl.ch</a></p>
     <a href="/index.php">Back</a>
-    
-    
+    <img src="../../src/coccodrillo.gif" alt="Coccodrillo che balla" style="width:300px">
+    <video src="../../src/video-pinguin.mp4" autoplay muted loop playsinline controls width="300"></video>
 
 </body>
 </html>
-
 
 <style>
   body {
