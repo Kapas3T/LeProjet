@@ -2,7 +2,8 @@
     <html lang="en">
     <head>
     <meta charset="UTF-8">
-    <h1 style="color:blue; font-size: 200px;">Davide</h1>
+    <h1 id="monSuperIdentifiant"> Davide</h1>
+
     <p>Born: 10.02.2011</p>
     <p>Email: <a href="mailto:davide.bonadeni@epfl.ch">davide.bonadeni@epfl.ch</a></p>
     <a href="/index.php">Back</a>
@@ -16,5 +17,15 @@
 <style>
   body {
     background-image: url('../../src/chatdavide.jpg');
+  }
+
+  #monSuperIdentifiant {
+      color: #59aacf;
+      font-size: 13em;
+      background-color: #8a2be28a;
+      border-radius: 11%;
+      border-style: groove;
+      border: 5px;
+      border-color: blue;
   }
 </style>
