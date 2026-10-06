@@ -4,6 +4,7 @@ import os
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 from functools import wraps
@@ -69,6 +70,43 @@ with sqlite3.connect(DB_PATH) as c:
     c.execute("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires REAL NOT NULL)")
 
 
+# Brute-force protection: too many wrong passwords from one address or for one account -> HTTP 429.
+FAILS = {}
+FAIL_LOCK = threading.Lock()
+FAIL_WINDOW = 15 * 60
+FAIL_LIMITS = {"ip": 10, "user": 20}
+
+
+def client_ip():
+    # Behind the Funnel proxy the last X-Forwarded-For entry is the address the proxy saw.
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[-1].strip() if forwarded else request.remote_addr
+
+
+def attempt_keys(username):
+    return [("ip", client_ip()), ("user", username)]
+
+
+def locked_out(keys):
+    now = time.time()
+    with FAIL_LOCK:
+        for key in keys:
+            recent = [t for t in FAILS.get(key, []) if now - t < FAIL_WINDOW]
+            if recent:
+                FAILS[key] = recent
+            else:
+                FAILS.pop(key, None)
+            if len(recent) >= FAIL_LIMITS[key[0]]:
+                return True
+    return False
+
+
+def record_failure(keys):
+    with FAIL_LOCK:
+        for key in keys:
+            FAILS.setdefault(key, []).append(time.time())
+
+
 def sha256(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -125,6 +163,9 @@ def too_large(_):
 def login():
     data = request.get_json(silent=True) or {}
     username = str(data.get("username", ""))
+    keys = attempt_keys(username)
+    if locked_out(keys):
+        return jsonify(error="too many attempts, try again in 15 minutes"), 429
     row = db().execute("SELECT pw_hash FROM users WHERE username=?", (username,)).fetchone()
     try:
         ph.verify(row["pw_hash"] if row else DUMMY_HASH, str(data.get("password", "")))
@@ -132,6 +173,7 @@ def login():
     except Exception:
         ok = False
     if not ok:
+        record_failure(keys)
         time.sleep(1)  # slows down password guessing
         abort(401)
     return jsonify(token=new_session(username), username=username)
@@ -144,10 +186,14 @@ def change_password():
     new = str(data.get("new", ""))
     if len(new) < MIN_PASSWORD:
         return jsonify(error=f"password must be at least {MIN_PASSWORD} characters"), 400
+    keys = attempt_keys(g.user)
+    if locked_out(keys):
+        return jsonify(error="too many attempts, try again in 15 minutes"), 429
     row = db().execute("SELECT pw_hash FROM users WHERE username=?", (g.user,)).fetchone()
     try:
         ph.verify(row["pw_hash"], str(data.get("old", "")))
     except Exception:
+        record_failure(keys)
         time.sleep(1)
         return jsonify(error="wrong current password"), 403
     db().execute("UPDATE users SET pw_hash=? WHERE username=?", (ph.hash(new), g.user))
@@ -299,5 +345,11 @@ if __name__ == "__main__":
     else:
         from waitress import serve
 
-        # HOST should be the Pi's Tailscale IP so the API is not reachable from the normal LAN.
-        serve(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))
+        # Listens on localhost only; the Tailscale Funnel proxy forwards public HTTPS traffic to it.
+        serve(
+            app,
+            host=os.environ.get("HOST", "127.0.0.1"),
+            port=int(os.environ.get("PORT", "8000")),
+            threads=8,
+            max_request_body_size=11 * 1024 * 1024,
+        )

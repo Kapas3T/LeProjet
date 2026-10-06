@@ -33,6 +33,14 @@ function api($method, $path, $body = null, $file = null) {
     return [(int)$m[1], json_decode($raw, true), $raw];
 }
 
+function unreachable_message() {
+    global $API;
+    if (str_starts_with($API, 'https') && !extension_loaded('openssl')) {
+        return 'PHP cannot make HTTPS requests: enable extension=openssl in php.ini';
+    }
+    return 'The Pi is unreachable. It may be switched off, or its vault is locked.';
+}
+
 $_SESSION['csrf'] = $_SESSION['csrf'] ?? bin2hex(random_bytes(16));
 $msg = '';
 $ok = '';
@@ -79,7 +87,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['token'] = $data['token'];
             $_SESSION['user'] = $data['username'];
         } else {
-            $msg = $code === 0 ? 'Pi is unreachable (is Tailscale on?)' : 'Wrong username or password';
+            $msg = $code === 0 ? unreachable_message() : ($code === 429 ? ($data['error'] ?? 'Too many attempts') : 'Wrong username or password');
         }
     } elseif ($action === 'logout') {
         session_destroy();
@@ -134,7 +142,7 @@ if (!empty($_SESSION['token'])) {
         $items = $data;
     } else {
         unset($_SESSION['token']);
-        $msg = $msg ?: ($code === 0 ? 'Pi is unreachable (is Tailscale on?)' : 'Session expired, log in again');
+        $msg = $msg ?: ($code === 0 ? unreachable_message() : 'Session expired, log in again');
     }
 }
 $logged = !empty($_SESSION['token']);
