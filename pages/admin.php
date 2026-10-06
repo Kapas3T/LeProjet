@@ -32,10 +32,10 @@ function api($method, $path, $body = null, $file = null) {
     $raw = @file_get_contents($API . $path, false, $ctx);
     if ($raw === false) {
         $GLOBALS['api_error'] = error_get_last()['message'] ?? '';
-        return [0, null, ''];
+        return [0, null, '', []];
     }
     preg_match('#HTTP/\S+ (\d+)#', $http_response_header[0], $m);
-    return [(int)$m[1], json_decode($raw, true), $raw];
+    return [(int)$m[1], json_decode($raw, true), $raw, $http_response_header];
 }
 
 function unreachable_message() {
@@ -65,22 +65,16 @@ if (isset($_GET['img'])) {
         exit;
     }
     $imgId = (int)$_GET['img'];
-    [$code, , $raw] = api('GET', "/items/$imgId/" . (isset($_GET['t']) ? 'thumb' : 'image'));
-    if ($code !== 200) {
+    [$code, , $raw, $headers] = api('GET', "/items/$imgId/" . (isset($_GET['t']) ? 'thumb' : 'image'));
+    // Only ever pass on a real image type as reported by the Pi.
+    if ($code !== 200 || !preg_match('#^Content-Type: image/(jpeg|png|webp)#mi', implode("\n", $headers), $m)) {
         http_response_code(404);
         exit;
     }
-    if (str_starts_with($raw, "\x89PNG")) {
-        [$type, $ext] = ['image/png', 'png'];
-    } elseif (str_starts_with($raw, "\xff\xd8")) {
-        [$type, $ext] = ['image/jpeg', 'jpg'];
-    } else {
-        [$type, $ext] = ['image/webp', 'webp'];
-    }
-    $disposition = isset($_GET['download']) ? 'attachment' : 'inline';
-    header("Content-Type: $type");
-    header('Cache-Control: ' . (isset($_GET['download']) ? 'no-store' : 'private, max-age=86400'));
-    header("Content-Disposition: $disposition; filename=\"item-$imgId.$ext\"");
+    $download = isset($_GET['download']);
+    header("Content-Type: image/$m[1]");
+    header('Cache-Control: ' . ($download ? 'no-store' : 'private, max-age=86400'));
+    header('Content-Disposition: ' . ($download ? 'attachment' : 'inline') . "; filename=\"item-$imgId." . ($m[1] === 'jpeg' ? 'jpg' : $m[1]) . '"');
     header('X-Content-Type-Options: nosniff');
     echo $raw;
     exit;
@@ -163,8 +157,13 @@ if (!empty($_SESSION['token'])) {
 $logged = !empty($_SESSION['token']);
 $mine = array_filter($items, fn($i) => $i['mine']);
 $others = array_filter($items, fn($i) => !$i['mine']);
-$csrf = htmlspecialchars($_SESSION['csrf']);
 function e($s) { return htmlspecialchars((string)$s); }
+// The hidden fields every form needs: the anti-forgery code, what to do, and (optionally) which item.
+function hidden($action, $id = null) {
+    return '<input type="hidden" name="csrf" value="' . e($_SESSION['csrf']) . '">'
+         . '<input type="hidden" name="action" value="' . $action . '">'
+         . ($id === null ? '' : '<input type="hidden" name="id" value="' . (int)$id . '">');
+}
 function image_block($it) {
     $iid = (int)$it['id'];
     if ($it['has_image']) {
@@ -194,8 +193,7 @@ function image_block($it) {
             <?php if ($logged): ?>
             <span class="id">Signed in as <b><?= e($_SESSION['user'] ?? '') ?></b></span>
             <form method="post" style="margin:0">
-                <input type="hidden" name="csrf" value="<?= $csrf ?>">
-                <input type="hidden" name="action" value="logout">
+                <?= hidden('logout') ?>
                 <button class="ghost">Log out</button>
             </form>
             <?php endif; ?>
@@ -208,16 +206,14 @@ function image_block($it) {
     <?php if (!$logged): ?>
         <form method="post" class="card login">
             <h2 style="margin-top:0">Log in</h2>
-            <input type="hidden" name="csrf" value="<?= $csrf ?>">
-            <input type="hidden" name="action" value="login">
+            <?= hidden('login') ?>
             <input name="username" placeholder="Username" required>
             <input name="password" type="password" placeholder="Password" required>
             <button>Log in</button>
         </form>
     <?php else: ?>
         <form method="post" class="card">
-            <input type="hidden" name="csrf" value="<?= $csrf ?>">
-            <input type="hidden" name="action" value="add">
+            <?= hidden('add') ?>
             <div class="row" style="margin-top:0">
                 <input name="title" placeholder="Title" required style="flex:1 1 180px;margin:0">
                 <input name="note" placeholder="Note (optional)" style="flex:2 1 260px;margin:0">
@@ -233,9 +229,7 @@ function image_block($it) {
             <div class="card">
                 <?php image_block($it); ?>
                 <form method="post">
-                    <input type="hidden" name="csrf" value="<?= $csrf ?>">
-                    <input type="hidden" name="action" value="save">
-                    <input type="hidden" name="id" value="<?= $iid ?>">
+                    <?= hidden('save', $iid) ?>
                     <input name="title" value="<?= e($it['title']) ?>" required>
                     <input name="note" value="<?= e($it['note']) ?>" placeholder="Note">
                     <label class="check"><input type="checkbox" name="shared" value="1" <?= $it['shared'] ? 'checked' : '' ?>> Shared with everyone</label><br>
@@ -244,9 +238,7 @@ function image_block($it) {
 
                 <div class="row">
                     <form method="post" enctype="multipart/form-data">
-                        <input type="hidden" name="csrf" value="<?= $csrf ?>">
-                        <input type="hidden" name="action" value="upload">
-                        <input type="hidden" name="id" value="<?= $iid ?>">
+                        <?= hidden('upload', $iid) ?>
                         <label class="btn ghost">
                             <?= $it['has_image'] ? 'Replace' : 'Upload' ?>
                             <input type="file" name="image" accept="image/jpeg,image/png,image/webp" hidden onchange="this.form.submit()">
@@ -256,9 +248,7 @@ function image_block($it) {
                         <a class="btn ghost" href="admin.php?img=<?= $iid ?>&amp;download=1">Download</a>
                     <?php endif; ?>
                     <form method="post" onsubmit="return confirm('Delete this item and its image?')">
-                        <input type="hidden" name="csrf" value="<?= $csrf ?>">
-                        <input type="hidden" name="action" value="delete">
-                        <input type="hidden" name="id" value="<?= $iid ?>">
+                        <?= hidden('delete', $iid) ?>
                         <button class="danger">Delete</button>
                     </form>
                 </div>
@@ -286,8 +276,7 @@ function image_block($it) {
         <details class="card">
             <summary>Change my password</summary>
             <form method="post" style="margin-top:12px;max-width:340px">
-                <input type="hidden" name="csrf" value="<?= $csrf ?>">
-                <input type="hidden" name="action" value="password">
+                <?= hidden('password') ?>
                 <input name="old" type="password" placeholder="Current password" required>
                 <input name="new" type="password" placeholder="New password (12+ characters)" minlength="12" required>
                 <input name="repeat" type="password" placeholder="Repeat new password" minlength="12" required>

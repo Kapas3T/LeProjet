@@ -14,6 +14,7 @@ from functools import wraps
 from argon2 import PasswordHasher
 from flask import Flask, abort, g, jsonify, request, send_file
 from PIL import Image, ImageOps
+from werkzeug.exceptions import HTTPException
 
 Image.MAX_IMAGE_PIXELS = 40_000_000  # refuse "decompression bomb" images
 
@@ -30,6 +31,7 @@ os.makedirs(IMG_DIR, exist_ok=True)
 SESSION_TTL = 8 * 3600
 MIN_PASSWORD = 12
 THUMB_SIZE = (400, 400)
+FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
 MAX_ITEMS_PER_USER = 200
 MAX_BYTES_PER_USER = 300 * 1024 * 1024
 ph = PasswordHasher()  # Argon2id
@@ -77,33 +79,19 @@ with sqlite3.connect(DB_PATH) as c:
     c.executescript(
         """
         CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, pw_hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             note TEXT NOT NULL DEFAULT '',
+            owner TEXT NOT NULL,
+            shared INTEGER NOT NULL DEFAULT 0,
             image TEXT,
-            owner TEXT NOT NULL DEFAULT '',
-            shared INTEGER NOT NULL DEFAULT 0
+            thumb TEXT,
+            bytes INTEGER NOT NULL DEFAULT 0
         );
         """
     )
-    # Upgrade an older database: add ownership, give old items to the first user.
-    if "owner" not in [r[1] for r in c.execute("PRAGMA table_info(items)")]:
-        c.execute("ALTER TABLE items ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
-        c.execute("ALTER TABLE items ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
-        c.execute("UPDATE items SET owner=COALESCE((SELECT username FROM users ORDER BY rowid LIMIT 1), '')")
-    for column, ddl in (("thumb", "TEXT"), ("bytes", "INTEGER NOT NULL DEFAULT 0")):
-        if column not in [r[1] for r in c.execute("PRAGMA table_info(items)")]:
-            c.execute(f"ALTER TABLE items ADD COLUMN {column} {ddl}")
-    for item_id, image in c.execute("SELECT id, image FROM items WHERE image IS NOT NULL AND bytes=0").fetchall():
-        try:
-            c.execute("UPDATE items SET bytes=? WHERE id=?", (os.path.getsize(os.path.join(IMG_DIR, image)), item_id))
-        except OSError:
-            pass
-    # Sessions are short-lived, so an old table without usernames is simply recreated.
-    if "username" not in [r[1] for r in c.execute("PRAGMA table_info(sessions)")]:
-        c.execute("DROP TABLE IF EXISTS sessions")
-    c.execute("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires REAL NOT NULL)")
 
 
 # Brute-force protection: too many wrong passwords from one address or for one account -> HTTP 429.
@@ -161,14 +149,13 @@ def require_auth(f):
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             abort(401)
+        g.token_hash = sha256(auth[7:])
         row = db().execute(
-            "SELECT username FROM sessions WHERE token_hash=? AND expires>?",
-            (sha256(auth[7:]), time.time()),
+            "SELECT username FROM sessions WHERE token_hash=? AND expires>?", (g.token_hash, time.time())
         ).fetchone()
         if not row:
             abort(401)
         g.user = row["username"]
-        g.token_hash = sha256(auth[7:])
         return f(*args, **kwargs)
 
     return wrapper
@@ -181,19 +168,10 @@ def secure_headers(resp):
     return resp
 
 
-@app.errorhandler(401)
-def unauthorized(_):
-    return jsonify(error="unauthorized"), 401
-
-
-@app.errorhandler(404)
-def not_found(_):
-    return jsonify(error="not found"), 404
-
-
-@app.errorhandler(413)
-def too_large(_):
-    return jsonify(error="file too large"), 413
+@app.errorhandler(HTTPException)
+def json_error(e):
+    # {"error": "unauthorized"}, {"error": "not found"}, ...; a 400 carries our own explanation.
+    return jsonify(error=e.description if e.code == 400 else e.name.lower()), e.code
 
 
 @app.post("/login")
@@ -273,30 +251,19 @@ def own_item(item_id):
 @require_auth
 def list_items():
     rows = db().execute(
-        "SELECT id, title, note, owner, shared, image IS NOT NULL AS has_image, substr(image, 1, 10) AS v FROM items "
-        "WHERE owner=? OR shared=1 ORDER BY id",
-        (g.user,),
-    ).fetchall()
-    out = []
-    for r in rows:
-        item = dict(r)
-        item["shared"] = bool(item["shared"])
-        item["mine"] = item["owner"] == g.user
-        out.append(item)
-    return jsonify(out)
+        "SELECT id, title, note, owner, shared, owner=? AS mine, image IS NOT NULL AS has_image, "
+        "substr(image, 1, 10) AS v FROM items WHERE owner=? OR shared=1 ORDER BY id",
+        (g.user, g.user),
+    )
+    return jsonify([dict(r) for r in rows])  # v: changes when the picture is replaced (browser cache key)
 
 
 def read_item_fields():
     data = request.get_json(silent=True) or {}
     title = str(data.get("title", "")).strip()
     if not title:
-        abort(400, description="title required")
-    return title, str(data.get("note", "")), 1 if data.get("shared") else 0
-
-
-@app.errorhandler(400)
-def bad_request(e):
-    return jsonify(error=e.description), 400
+        abort(400, "title required")
+    return title, str(data.get("note", "")), int(bool(data.get("shared")))
 
 
 @app.post("/items")
@@ -333,17 +300,6 @@ def delete_item(item_id):
     return jsonify(ok=True)
 
 
-def sniff(head):
-    """Detect image type by file content, never by the client-supplied name."""
-    if head.startswith(b"\xff\xd8\xff"):
-        return "jpg"
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "webp"
-    return None
-
-
 def remove_files(*names):
     for name in names:
         if name:
@@ -354,8 +310,10 @@ def remove_files(*names):
 
 
 def make_thumb(source):
-    """Small JPEG copy (also strips EXIF data such as GPS position). `source` is a path or file object."""
+    """Small JPEG copy (also strips EXIF data such as GPS position). `source` is a path or file object.
+    Returns (thumbnail name, file extension). The type is read from the file's content, never from its name."""
     with Image.open(source) as im:
+        ext = FORMATS[im.format]  # KeyError for anything but JPEG, PNG, WebP
         im = ImageOps.exif_transpose(im)
         im.thumbnail(THUMB_SIZE)
         im = im.convert("RGBA")
@@ -363,7 +321,7 @@ def make_thumb(source):
         im = Image.alpha_composite(flat, im).convert("RGB")
         name = uuid.uuid4().hex + "_t.jpg"
         im.save(os.path.join(IMG_DIR, name), "JPEG", quality=80, optimize=True)
-        return name
+        return name, ext
 
 
 @app.post("/items/<int:item_id>/image")
@@ -374,18 +332,15 @@ def upload_image(item_id):
     if not f:
         return jsonify(error="image field required"), 400
     data = f.read()
-    ext = sniff(data[:12])
-    if not ext:
-        return jsonify(error="only jpg, png, webp allowed"), 400
     used = db().execute(
         "SELECT COALESCE(SUM(bytes), 0) FROM items WHERE owner=? AND id!=?", (g.user, item_id)
     ).fetchone()[0]
     if used + len(data) > MAX_BYTES_PER_USER:
         return jsonify(error=f"storage limit of {MAX_BYTES_PER_USER // 1024 // 1024} MB reached"), 400
     try:
-        thumb = make_thumb(io.BytesIO(data))  # also proves the file really is a readable image
+        thumb, ext = make_thumb(io.BytesIO(data))  # decoding it also proves it is a real image
     except Exception:
-        return jsonify(error="could not read this image"), 400
+        return jsonify(error="only valid jpg, png or webp images are allowed"), 400
 
     name = uuid.uuid4().hex + "." + ext  # random name, no user input in the path
     with open(os.path.join(IMG_DIR, name), "wb") as out:
@@ -405,7 +360,7 @@ def get_thumb(item_id):
     name = row["thumb"]
     if not name or not os.path.exists(os.path.join(IMG_DIR, name)):
         try:  # images uploaded before thumbnails existed get theirs on first request
-            name = make_thumb(os.path.join(IMG_DIR, row["image"]))
+            name, _ = make_thumb(os.path.join(IMG_DIR, row["image"]))
         except Exception:
             abort(404)
         db().execute("UPDATE items SET thumb=? WHERE id=?", (name, item_id))
