@@ -1,5 +1,6 @@
 import getpass
 import hashlib
+import io
 import os
 import secrets
 import sqlite3
@@ -11,6 +12,9 @@ from functools import wraps
 
 from argon2 import PasswordHasher
 from flask import Flask, abort, g, jsonify, request, send_file
+from PIL import Image, ImageOps
+
+Image.MAX_IMAGE_PIXELS = 40_000_000  # refuse "decompression bomb" images
 
 # Data (DB + images) lives in DATA_DIR, which must be the mounted encrypted volume.
 DATA_DIR = os.environ.get("DATA_DIR")
@@ -24,6 +28,9 @@ os.makedirs(IMG_DIR, exist_ok=True)
 
 SESSION_TTL = 8 * 3600
 MIN_PASSWORD = 12
+THUMB_SIZE = (400, 400)
+MAX_ITEMS_PER_USER = 200
+MAX_BYTES_PER_USER = 300 * 1024 * 1024
 ph = PasswordHasher()  # Argon2id
 DUMMY_HASH = ph.hash("dummy")  # makes login timing equal for unknown users
 
@@ -64,6 +71,14 @@ with sqlite3.connect(DB_PATH) as c:
         c.execute("ALTER TABLE items ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
         c.execute("ALTER TABLE items ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
         c.execute("UPDATE items SET owner=COALESCE((SELECT username FROM users ORDER BY rowid LIMIT 1), '')")
+    for column, ddl in (("thumb", "TEXT"), ("bytes", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in [r[1] for r in c.execute("PRAGMA table_info(items)")]:
+            c.execute(f"ALTER TABLE items ADD COLUMN {column} {ddl}")
+    for item_id, image in c.execute("SELECT id, image FROM items WHERE image IS NOT NULL AND bytes=0").fetchall():
+        try:
+            c.execute("UPDATE items SET bytes=? WHERE id=?", (os.path.getsize(os.path.join(IMG_DIR, image)), item_id))
+        except OSError:
+            pass
     # Sessions are short-lived, so an old table without usernames is simply recreated.
     if "username" not in [r[1] for r in c.execute("PRAGMA table_info(sessions)")]:
         c.execute("DROP TABLE IF EXISTS sessions")
@@ -222,7 +237,7 @@ def own_item(item_id):
 @require_auth
 def list_items():
     rows = db().execute(
-        "SELECT id, title, note, owner, shared, image IS NOT NULL AS has_image FROM items "
+        "SELECT id, title, note, owner, shared, image IS NOT NULL AS has_image, substr(image, 1, 10) AS v FROM items "
         "WHERE owner=? OR shared=1 ORDER BY id",
         (g.user,),
     ).fetchall()
@@ -252,6 +267,9 @@ def bad_request(e):
 @require_auth
 def create_item():
     title, note, shared = read_item_fields()
+    count = db().execute("SELECT COUNT(*) FROM items WHERE owner=?", (g.user,)).fetchone()[0]
+    if count >= MAX_ITEMS_PER_USER:
+        return jsonify(error=f"limit of {MAX_ITEMS_PER_USER} items reached"), 400
     cur = db().execute(
         "INSERT INTO items(title, note, owner, shared) VALUES (?, ?, ?, ?)", (title, note, g.user, shared)
     )
@@ -273,7 +291,7 @@ def update_item(item_id):
 @require_auth
 def delete_item(item_id):
     row = own_item(item_id)
-    remove_image(row["image"])
+    remove_files(row["image"], row["thumb"])
     db().execute("DELETE FROM items WHERE id=?", (item_id,))
     db().commit()
     return jsonify(ok=True)
@@ -290,12 +308,26 @@ def sniff(head):
     return None
 
 
-def remove_image(name):
-    if name:
-        try:
-            os.remove(os.path.join(IMG_DIR, name))
-        except FileNotFoundError:
-            pass
+def remove_files(*names):
+    for name in names:
+        if name:
+            try:
+                os.remove(os.path.join(IMG_DIR, name))
+            except FileNotFoundError:
+                pass
+
+
+def make_thumb(source):
+    """Small JPEG copy (also strips EXIF data such as GPS position). `source` is a path or file object."""
+    with Image.open(source) as im:
+        im = ImageOps.exif_transpose(im)
+        im.thumbnail(THUMB_SIZE)
+        im = im.convert("RGBA")
+        flat = Image.new("RGBA", im.size, (255, 255, 255, 255))  # transparent areas become white
+        im = Image.alpha_composite(flat, im).convert("RGB")
+        name = uuid.uuid4().hex + "_t.jpg"
+        im.save(os.path.join(IMG_DIR, name), "JPEG", quality=80, optimize=True)
+        return name
 
 
 @app.post("/items/<int:item_id>/image")
@@ -309,14 +341,40 @@ def upload_image(item_id):
     ext = sniff(data[:12])
     if not ext:
         return jsonify(error="only jpg, png, webp allowed"), 400
+    used = db().execute(
+        "SELECT COALESCE(SUM(bytes), 0) FROM items WHERE owner=? AND id!=?", (g.user, item_id)
+    ).fetchone()[0]
+    if used + len(data) > MAX_BYTES_PER_USER:
+        return jsonify(error=f"storage limit of {MAX_BYTES_PER_USER // 1024 // 1024} MB reached"), 400
+    try:
+        thumb = make_thumb(io.BytesIO(data))  # also proves the file really is a readable image
+    except Exception:
+        return jsonify(error="could not read this image"), 400
 
     name = uuid.uuid4().hex + "." + ext  # random name, no user input in the path
     with open(os.path.join(IMG_DIR, name), "wb") as out:
         out.write(data)
-    remove_image(row["image"])
-    db().execute("UPDATE items SET image=? WHERE id=?", (name, item_id))
+    remove_files(row["image"], row["thumb"])
+    db().execute("UPDATE items SET image=?, thumb=?, bytes=? WHERE id=?", (name, thumb, len(data), item_id))
     db().commit()
     return jsonify(ok=True)
+
+
+@app.get("/items/<int:item_id>/thumb")
+@require_auth
+def get_thumb(item_id):
+    row = visible_item(item_id)
+    if not row["image"]:
+        abort(404)
+    name = row["thumb"]
+    if not name or not os.path.exists(os.path.join(IMG_DIR, name)):
+        try:  # images uploaded before thumbnails existed get theirs on first request
+            name = make_thumb(os.path.join(IMG_DIR, row["image"]))
+        except Exception:
+            abort(404)
+        db().execute("UPDATE items SET thumb=? WHERE id=?", (name, item_id))
+        db().commit()
+    return send_file(os.path.join(IMG_DIR, name), mimetype="image/jpeg")
 
 
 @app.get("/items/<int:item_id>/image")

@@ -41,6 +41,7 @@
         <li>The website checks that you are logged in, then forwards the file to the Pi over an encrypted HTTPS connection.</li>
         <li>The Pi looks <em>inside</em> the file to make sure it is really a JPG, PNG or WebP (the file name is not trusted).</li>
         <li>The Pi gives the file a random name and stores it in the encrypted vault. The database remembers which item it belongs to.</li>
+        <li>The Pi also makes a small preview (about 50 KB). The page shows only previews, so it loads fast; the full photo is fetched when you click it or press Download. Your browser keeps each preview for a day.</li>
         <li>To show or download the photo, the website asks the Pi again. The browser never gets a direct address of the Pi.</li>
     </ol>
 
@@ -68,7 +69,7 @@
         </div>
         <div class="card">
             <b>Careful with uploads</b>
-            <p>Only JPG, PNG and WebP, at most 10 MB, stored under random names. A fake "picture" with code inside is rejected.</p>
+            <p>Only JPG, PNG and WebP, at most 10 MB, stored under random names. A fake "picture" with code inside is rejected, and so is a broken file. The small preview is re-drawn from scratch, which also removes hidden data such as the GPS position from phone photos. Each person has limits (200 items, 300 MB) so nobody can fill the disk by accident.</p>
         </div>
         <div class="card">
             <b>Forms cannot be forged</b>

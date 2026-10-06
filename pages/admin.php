@@ -1,7 +1,11 @@
 <?php
 // Admin page for the Raspberry Pi API. The API token stays in the PHP session, never in the browser.
 session_set_cookie_params(['httponly' => true, 'samesite' => 'Strict']);
+session_cache_limiter(''); // we set caching headers ourselves: pictures are cached, pages are not
 session_start();
+if (!isset($_GET['img'])) {
+    header('Cache-Control: no-store');
+}
 
 $API = getenv('PI_API') ?: 'https://pi-lab-01.tailfc7dca.ts.net'; // public HTTPS address of the Pi (Tailscale Funnel)
 
@@ -53,14 +57,15 @@ $_SESSION['csrf'] = $_SESSION['csrf'] ?? bin2hex(random_bytes(16));
 $msg = '';
 $ok = '';
 
-// Image proxy: admin.php?img=ID shows the picture, &download=1 saves it as a file.
+// Image proxy: admin.php?img=ID shows the picture, &t=1 gives the small thumbnail, &download=1 saves the original.
+// The &v= value changes whenever the picture is replaced, so the browser may keep each version for a day.
 if (isset($_GET['img'])) {
     if (empty($_SESSION['token'])) {
         http_response_code(403);
         exit;
     }
     $imgId = (int)$_GET['img'];
-    [$code, , $raw] = api('GET', "/items/$imgId/image");
+    [$code, , $raw] = api('GET', "/items/$imgId/" . (isset($_GET['t']) ? 'thumb' : 'image'));
     if ($code !== 200) {
         http_response_code(404);
         exit;
@@ -74,6 +79,7 @@ if (isset($_GET['img'])) {
     }
     $disposition = isset($_GET['download']) ? 'attachment' : 'inline';
     header("Content-Type: $type");
+    header('Cache-Control: ' . (isset($_GET['download']) ? 'no-store' : 'private, max-age=86400'));
     header("Content-Disposition: $disposition; filename=\"item-$imgId.$ext\"");
     header('X-Content-Type-Options: nosniff');
     echo $raw;
@@ -103,10 +109,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     } elseif (!empty($_SESSION['token'])) {
         $fields = ['title' => $_POST['title'] ?? '', 'note' => $_POST['note'] ?? '', 'shared' => !empty($_POST['shared'])];
+        $data = null;
         if ($action === 'add') {
-            [$code] = api('POST', '/items', $fields);
+            [$code, $data] = api('POST', '/items', $fields);
         } elseif ($action === 'save') {
-            [$code] = api('PUT', "/items/$id", $fields);
+            [$code, $data] = api('PUT', "/items/$id", $fields);
         } elseif ($action === 'password') {
             if (($_POST['new'] ?? '') !== ($_POST['repeat'] ?? '')) {
                 $code = 400;
@@ -121,7 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($action === 'delete') {
-            [$code] = api('DELETE', "/items/$id");
+            [$code, $data] = api('DELETE', "/items/$id");
         } elseif ($action === 'upload') {
             $f = $_FILES['image'] ?? null;
             if (!$f || $f['error'] !== UPLOAD_ERR_OK) {
@@ -129,16 +136,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $msg = 'Upload failed (PHP limit is ' . ini_get('upload_max_filesize') . ')';
             } else {
                 [$code, $data] = api('POST', "/items/$id/image", null, $f['tmp_name']);
-                if ($code === 400) {
-                    $msg = $data['error'] ?? 'Rejected';
-                }
             }
         }
         if (($code ?? 200) === 401) {
             unset($_SESSION['token']);
             $msg = 'Session expired, log in again';
         } elseif (!$msg && ($code ?? 200) >= 400) {
-            $msg = 'Error ' . $code;
+            $msg = $data['error'] ?? 'Error ' . $code; // e.g. "storage limit of 300 MB reached"
         }
     }
 }
@@ -161,7 +165,9 @@ function e($s) { return htmlspecialchars((string)$s); }
 function image_block($it) {
     $iid = (int)$it['id'];
     if ($it['has_image']) {
-        echo '<a href="admin.php?img=' . $iid . '" target="_blank"><img class="photo" src="admin.php?img=' . $iid . '" alt="' . e($it['title']) . '"></a>';
+        $v = urlencode($it['v'] ?? '');
+        echo '<a href="admin.php?img=' . $iid . '&amp;v=' . $v . '" target="_blank">'
+           . '<img class="photo" loading="lazy" src="admin.php?img=' . $iid . '&amp;t=1&amp;v=' . $v . '" alt="' . e($it['title']) . '"></a>';
     } else {
         echo '<div class="photo empty">No image yet</div>';
     }
@@ -244,7 +250,7 @@ function image_block($it) {
                         </label>
                     </form>
                     <?php if ($it['has_image']): ?>
-                        <a class="btn ghost" href="admin.php?img=<?= $iid ?>&download=1">Download</a>
+                        <a class="btn ghost" href="admin.php?img=<?= $iid ?>&amp;download=1">Download</a>
                     <?php endif; ?>
                     <form method="post" onsubmit="return confirm('Delete this item and its image?')">
                         <input type="hidden" name="csrf" value="<?= $csrf ?>">
@@ -267,7 +273,7 @@ function image_block($it) {
                 <p class="id" style="margin:4px 0"><?= e($it['note']) ?></p>
                 <span class="badge">by <?= e($it['owner']) ?></span>
                 <?php if ($it['has_image']): ?>
-                    <div class="row"><a class="btn ghost" href="admin.php?img=<?= $iid ?>&download=1">Download</a></div>
+                    <div class="row"><a class="btn ghost" href="admin.php?img=<?= $iid ?>&amp;download=1">Download</a></div>
                 <?php endif; ?>
             </div>
             <?php endforeach; ?>
