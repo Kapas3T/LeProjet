@@ -33,10 +33,13 @@
                     <p>Weather in Lausanne at <span id="elevation">...</span>: <span id="weather">...</span></p>
                     <script>
                         fetch("https://api.open-meteo.com/v1/forecast?latitude=46.52&longitude=6.63&current=temperature_2m")
-                            .then(r => r.json())
+                            .then((data) => data.json())
                             .then((data) => {
-                                document.getElementById("elevation").textContent = data.elevation + " m";
-                                document.getElementById("weather").textContent = data.current.temperature_2m + " °C";
+                                const elevation = data.elevation ?? 0;
+                                const temperature = data.current?.temperature_2m ?? "N/A";
+
+                                document.getElementById("elevation").textContent = elevation + " m";
+                                document.getElementById("weather").textContent = temperature + " °C";
                             });
                     </script>
                 </div>
