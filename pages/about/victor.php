@@ -43,6 +43,16 @@
                             });
                     </script>
                 </div>
+                <div id="interactiveDiv">
+                    <p> Victor is <span id="age">...</span> years old. </p>
+                    <script>
+                        let i = 0;
+                        while (i < 18) {
+                            i++;
+                            document.getElementById("age").textContent = i;
+                        }
+                    </script>
+                </div>
 
             </article>
         </section>
